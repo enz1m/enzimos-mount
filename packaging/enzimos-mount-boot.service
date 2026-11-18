@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=enzimOS network shares mounted at startup
+Documentation=file:///usr/share/doc/enzimos-mount/README.md
+# Skipped entirely unless someone set a share to mount at startup.
+ConditionDirectoryNotEmpty=/var/lib/enzimos-mount/boot
+# Started once the network stack is up; nothing waits for it, so a server
+# that is off never delays or fails startup. It retries in the background
+# and exits when every share is mounted.
+After=network.target NetworkManager.service systemd-resolved.service enzimos-mount-cleanup.service
+Wants=enzimos-mount-cleanup.service
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/enzimos-mount/enzimos-mount-system --boot
+# Mounts must land in the host's mount namespace (see enzimos-mount-system.service).
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_NET_BIND_SERVICE CAP_KILL
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryMax=64M
+TasksMax=64
+LimitCORE=0
+Nice=10
+# Files the service creates (registry, lock, credentials) are root-only.
+UMask=0077

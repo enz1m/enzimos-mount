@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=enzimOS kernel mounts for network shares
+Documentation=file:///usr/share/doc/enzimos-mount/README.md
+
+[Service]
+Type=dbus
+BusName=org.enzimos.MountSystem1
+ExecStart=/usr/lib/enzimos-mount/enzimos-mount-system
+# Mounts must land in the host's mount namespace, so no option that gives the
+# service a private namespace (ProtectSystem, PrivateTmp, ProtectHome, ...).
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_NET_BIND_SERVICE CAP_KILL
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=64M
+TasksMax=64
+LimitCORE=0
+Restart=no
+# Files the service creates (registry, lock, credentials) are root-only.
+UMask=0077

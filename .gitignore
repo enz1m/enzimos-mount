@@ -1,0 +1,7 @@
+/target/
+/.local/
+/AGENTS.md
+__pycache__/
+*.pyc
+*.sock
+*.log

@@ -1,0 +1,104 @@
+[package]
+name = "enzimos-mount"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "enzimOS storage mounting: removable drives, phones and network shares"
+publish = false
+
+[[bin]]
+name = "enzimos-mountd"
+path = "src/bin/enzimos-mountd.rs"
+
+[[bin]]
+name = "enzimos-mount-system"
+path = "src/bin/enzimos-mount-system.rs"
+
+[[bin]]
+name = "enzimos-mount-worker"
+path = "src/bin/enzimos-mount-worker.rs"
+
+[[bin]]
+name = "enzimos-mount"
+path = "src/bin/enzimos-mount.rs"
+
+[dependencies]
+# Match oo7's zbus major to share one D-Bus stack.
+zbus = { version = "6.3", default-features = false, features = ["tokio"] }
+oo7 = { version = "0.7.1", default-features = false, features = ["tokio", "native_crypto"] }
+tokio = { version = "1.54", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process", "fs"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustix = { version = "1.1", features = ["fs", "mount", "process", "pipe", "rand", "net", "thread", "system", "event"] }
+nix = { version = "0.31", default-features = false, features = ["user"] }
+udev = "0.9"
+url = "2"
+zeroize = "1.9"
+# Translations (the same Fluent stack as the enzUI apps).
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+
+[profile.release]
+# Smaller, faster binaries: whole-program optimization. Unwinding stays, so a
+# panicking task cannot take the whole service (and its FUSE mounts) down.
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stdout = "warn"
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+return_self_not_must_use = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+trivially_copy_pass_by_ref = "warn"
+large_stack_arrays = "warn"
+ref_option = "warn"
+implicit_clone = "warn"
+assigning_clones = "warn"
+or_fun_call = "warn"
+cast_lossless = "warn"
+significant_drop_in_scrutinee = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
+explicit_iter_loop = "warn"
+ignored_unit_patterns = "warn"
+unused_async = "warn"
+string_slice = "warn"
+unwrap_in_result = "warn"
+panic = "warn"
+iter_over_hash_type = "warn"
+allow_attributes_without_reason = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_assert_message = "warn"
+str_to_string = "warn"
+format_push_string = "warn"
+redundant_type_annotations = "warn"
+
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

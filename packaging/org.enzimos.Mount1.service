@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.enzimos.Mount1
+Exec=/usr/lib/enzimos-mount/enzimos-mountd
+SystemdService=enzimos-mountd.service

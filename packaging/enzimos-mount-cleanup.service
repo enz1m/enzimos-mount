@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=enzimOS network shares detached before the network stops
+Documentation=file:///usr/share/doc/enzimos-mount/README.md
+# Ordered after the network, so at shutdown it stops (and detaches every
+# kernel SMB/NFS mount) before the network goes away: shutdown never waits
+# on a share whose server can no longer be reached.
+After=network.target NetworkManager.service systemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/usr/lib/enzimos-mount/enzimos-mount-system --unmount-all
+TimeoutStopSec=30
+# Files the service creates (registry, lock, credentials) are root-only.
+UMask=0077

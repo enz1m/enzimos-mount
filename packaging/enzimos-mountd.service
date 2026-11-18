@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=enzimOS drives, phones and network locations
+Documentation=file:///usr/share/doc/enzimos-mount/README.md
+PartOf=enzui-session.target
+After=enzui-session.target
+
+[Service]
+Type=dbus
+BusName=org.enzimos.Mount1
+ExecStart=/usr/lib/enzimos-mount/enzimos-mountd
+# FUSE helpers (phones, SFTP, WebDAV) run inside this unit; the limits bound
+# the whole tree so a misbehaving server cannot take the session's memory.
+MemoryHigh=192M
+MemoryMax=384M
+TasksMax=256
+# fusermount3 is setuid; FUSE helpers need it.
+NoNewPrivileges=no
+LimitCORE=0
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s

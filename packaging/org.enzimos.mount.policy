@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- SPDX-License-Identifier: MIT -->
+<policyconfig>
+  <vendor>enzimOS</vendor>
+  <action id="org.enzimos.mount.user-mount">
+    <description>Mount a network share or phone for yourself</description>
+    <description xml:lang="es">Montar un recurso compartido de red o un teléfono para ti</description>
+    <message>Authentication is required to mount a network share or phone</message>
+    <message xml:lang="es">Se necesita autenticación para montar un recurso compartido de red o un teléfono</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+  <action id="org.enzimos.mount.boot-mount">
+    <description>Mount a network share at startup</description>
+    <description xml:lang="es">Montar un recurso compartido de red al iniciar</description>
+    <message>Authentication is required to mount “$(share)” on $(server) every time the computer starts</message>
+    <message xml:lang="es">Se necesita autenticación para montar «$(share)» de $(server) cada vez que se inicie el ordenador</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Every new startup share is approved on its own. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+  <action id="org.enzimos.mount.smb1">
+    <description>Connect to a server with the old SMB1 protocol</description>
+    <description xml:lang="es">Conectarse a un servidor con el protocolo antiguo SMB1</description>
+    <message>Authentication is required to allow the old, less secure SMB1 protocol for $(server)</message>
+    <message xml:lang="es">Se necesita autenticación para permitir el protocolo SMB1, antiguo y menos seguro, con $(server)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
