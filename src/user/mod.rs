@@ -659,7 +659,7 @@ impl Daemon {
         };
         while let Some(message) = stream.next().await {
             let Ok(message) = message else { continue };
-            if let Some((id, action)) = notifier.interpret(&message) {
+            if let Some((id, action)) = notifier.interpret(&message).await {
                 tokio::spawn(Arc::clone(&self).on_action(id, action));
             }
         }

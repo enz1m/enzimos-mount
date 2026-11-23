@@ -8,13 +8,40 @@
 //! notification per item is kept and replaced, and closed when moot.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use zbus::Variant;
 
 const DEST: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct NotificationIds {
+    by_item: HashMap<String, u32>,
+    by_id: HashMap<u32, String>,
+}
+
+impl NotificationIds {
+    fn record(&mut self, item: &str, id: u32) {
+        self.remove_item(item);
+        self.remove_id(id);
+        self.by_item.insert(item.to_owned(), id);
+        self.by_id.insert(id, item.to_owned());
+    }
+
+    fn remove_item(&mut self, item: &str) -> Option<u32> {
+        let id = self.by_item.remove(item)?;
+        self.by_id.remove(&id);
+        Some(id)
+    }
+
+    fn remove_id(&mut self, id: u32) {
+        if let Some(item) = self.by_id.remove(&id) {
+            self.by_item.remove(&item);
+        }
+    }
+}
 
 /// What a notification action asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +95,8 @@ pub struct Note<'a> {
 /// Sends notifications and maps their actions back to items.
 pub struct Notifier {
     connection: zbus::Connection,
-    by_item: Mutex<HashMap<String, u32>>,
-    by_id: Mutex<HashMap<u32, String>>,
+    // Keep the RPC and ID update ordered with withdrawals and signals.
+    ids: Mutex<NotificationIds>,
 }
 
 impl Notifier {
@@ -78,8 +105,7 @@ impl Notifier {
     pub fn new(connection: zbus::Connection) -> Self {
         Self {
             connection,
-            by_item: Mutex::new(HashMap::new()),
-            by_id: Mutex::new(HashMap::new()),
+            ids: Mutex::default(),
         }
     }
 
@@ -91,16 +117,11 @@ impl Notifier {
 
     /// Show `note`, replacing the item's previous notification.
     pub async fn show(&self, note: &Note<'_>) {
+        let mut ids = self.ids.lock().await;
         let Some(proxy) = self.proxy().await else {
             return;
         };
-        let replaces = self
-            .by_item
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(note.item)
-            .copied()
-            .unwrap_or(0);
+        let replaces = ids.by_item.get(note.item).copied().unwrap_or(0);
         let mut actions: Vec<&str> = Vec::new();
         for (action, label) in note.actions {
             actions.push(action.key());
@@ -129,16 +150,7 @@ impl Notifier {
         );
         let call = proxy.call::<_, _, u32>("Notify", &body);
         match tokio::time::timeout(CALL_TIMEOUT, call).await {
-            Ok(Ok(id)) => {
-                self.by_item
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(note.item.to_owned(), id);
-                self.by_id
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(id, note.item.to_owned());
-            }
+            Ok(Ok(id)) => ids.record(note.item, id),
             Ok(Err(error)) => crate::log!(debug, "notification not shown: {error}"),
             Err(_) => crate::log!(debug, "notification service did not answer"),
         }
@@ -146,23 +158,15 @@ impl Notifier {
 
     /// Withdraw the item's notification, if any.
     pub async fn close(&self, item: &str) {
-        let id = self
-            .by_item
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(item);
-        if let Some(id) = id {
-            self.by_id
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id);
-            if let Some(proxy) = self.proxy().await {
-                let _ = tokio::time::timeout(
-                    CALL_TIMEOUT,
-                    proxy.call::<_, _, ()>("CloseNotification", &(id,)),
-                )
-                .await;
-            }
+        let mut ids = self.ids.lock().await;
+        if let Some(id) = ids.remove_item(item)
+            && let Some(proxy) = self.proxy().await
+        {
+            let _ = tokio::time::timeout(
+                CALL_TIMEOUT,
+                proxy.call::<_, _, ()>("CloseNotification", &(id,)),
+            )
+            .await;
         }
     }
 
@@ -181,35 +185,21 @@ impl Notifier {
     }
 
     /// Interpret a Notifications signal: an action on one of ours, or a close.
-    pub fn interpret(&self, message: &zbus::Message) -> Option<(String, Action)> {
-        let member = message.header().member()?.to_string();
-        if member == "NotificationClosed" {
-            if let Ok((id, _reason)) = message.body().deserialize::<(u32, u32)>() {
-                let item = self
-                    .by_id
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id);
-                if let Some(item) = item {
-                    self.by_item
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&item);
-                }
+    pub async fn interpret(&self, message: &zbus::Message) -> Option<(String, Action)> {
+        match message.header().member()?.as_str() {
+            "NotificationClosed" => {
+                let (id, _reason) = message.body().deserialize::<(u32, u32)>().ok()?;
+                self.ids.lock().await.remove_id(id);
+                None
             }
-            return None;
+            "ActionInvoked" => {
+                let (id, key) = message.body().deserialize::<(u32, String)>().ok()?;
+                let action = Action::parse(&key)?;
+                let item = self.ids.lock().await.by_id.get(&id).cloned()?;
+                Some((item, action))
+            }
+            _ => None,
         }
-        if member != "ActionInvoked" {
-            return None;
-        }
-        let (id, key) = message.body().deserialize::<(u32, String)>().ok()?;
-        let item = self
-            .by_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&id)
-            .cloned()?;
-        Some((item, Action::parse(&key)?))
     }
 }
 
@@ -258,5 +248,23 @@ pub fn arrival(kind: crate::api::Kind, label: &str) -> (String, String, &'static
             crate::tr!("notify-connected-phone"),
             "phone",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NotificationIds;
+
+    #[test]
+    fn delayed_close_for_replaced_id_preserves_current_notification() {
+        let mut ids = NotificationIds::default();
+        ids.record("camera", 1);
+        ids.record("camera", 2);
+        ids.remove_id(1);
+
+        assert_eq!(ids.by_id.get(&1), None);
+        assert_eq!(ids.by_id.get(&2).map(String::as_str), Some("camera"));
+        assert_eq!(ids.remove_item("camera"), Some(2));
+        assert!(ids.by_id.is_empty());
     }
 }
