@@ -908,6 +908,9 @@ impl Daemon {
         };
         let path = result?;
         self.changed();
+        if username != uri_user(&location) {
+            forget_other_users(id, account_user);
+        }
         if credentials.remember {
             self.update_location_user(id, &uri, true);
             self.remember_later(id, credentials);
@@ -1674,7 +1677,12 @@ impl Daemon {
             .iter_mut()
             .find(|l| l.id == id)
             .ok_or_else(|| Error::NotFound(crate::tr!("error-no-such-location")))?;
+        let previous_user = uri_user(location);
         apply_options(location, options)?;
+        let user = uri_user(location);
+        if user != previous_user {
+            forget_other_users(id, user.unwrap_or_else(login_name));
+        }
         inner.retry.remove(id);
         persist(&inner);
         drop(inner);
@@ -2578,6 +2586,12 @@ fn leftovers_present() -> bool {
                     || matches!(mount.fs_type.as_str(), "cifs" | "smb3" | "nfs" | "nfs4")
             }
         })
+}
+
+/// Drop the passwords a location kept for an account it no longer uses.
+fn forget_other_users(id: &str, user: String) {
+    let id = id.to_owned();
+    tokio::spawn(async move { keyring::forget_other_users(&id, &user).await });
 }
 
 fn uri_user(location: &Location) -> Option<String> {

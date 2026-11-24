@@ -6,7 +6,7 @@
 //!
 //! Items carry the location identity and also protocol, server and user, so
 //! another share on the same server with the same account finds the password
-//! without asking again.
+//! without asking again. A location keeps items for one user only.
 
 use crate::secret::Secret;
 use std::collections::HashMap;
@@ -112,19 +112,20 @@ async fn find(attributes: HashMap<&str, &str>) -> Option<Secret> {
     .flatten()
 }
 
-/// The stored password for this location, or for the same account on the
-/// same server.
+/// The stored password for this account at this location, or for the same
+/// account on the same server.
 pub async fn lookup(account: &Account<'_>) -> Option<Secret> {
+    if account.user.is_empty() {
+        return None;
+    }
     if let Some(secret) = find(HashMap::from([
         ("xdg:schema", SCHEMA),
         ("location", account.id),
+        ("user", account.user),
     ]))
     .await
     {
         return Some(secret);
-    }
-    if account.user.is_empty() {
-        return None;
     }
     find(HashMap::from([
         ("xdg:schema", SCHEMA),
@@ -135,7 +136,8 @@ pub async fn lookup(account: &Account<'_>) -> Option<Secret> {
     .await
 }
 
-/// Store the password for this location.
+/// Store the password for this location, replacing any stored for another
+/// user there.
 ///
 /// # Errors
 /// A sentence when the keyring refused or did not answer.
@@ -166,12 +168,35 @@ pub async fn store(
                     oo7::Secret::blob(secret.expose()),
                     true,
                 )
-                .await
+                .await?;
+            if let Err(error) = delete_other_users(keyring, account.id, account.user).await {
+                crate::log!(info, "keyring cleanup failed: {error}");
+            }
+            Ok(())
         },
         UNLOCK_TIMEOUT,
     )
     .await
     .ok_or_else(|| crate::tr!("error-keyring-store"))
+}
+
+async fn delete_other_users(keyring: &oo7::Keyring, id: &str, user: &str) -> oo7::Result<()> {
+    let attributes = HashMap::from([("xdg:schema", SCHEMA), ("location", id)]);
+    for item in keyring.search_items(&attributes).await? {
+        if item.attributes().await?.get("user").map(String::as_str) != Some(user) {
+            item.delete().await?;
+        }
+    }
+    Ok(())
+}
+
+/// Forget the passwords stored at location `id` for any user but `user`.
+pub async fn forget_other_users(id: &str, user: &str) {
+    let _ = with_keyring(
+        async move |keyring| delete_other_users(keyring, id, user).await,
+        CALL_TIMEOUT,
+    )
+    .await;
 }
 
 /// Forget the password for location `id`.
