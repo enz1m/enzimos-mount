@@ -185,11 +185,15 @@ fn with_registry_in<T>(dir: &Path, change: impl FnOnce(&mut Vec<Entry>) -> T) ->
             serde_json::from_slice(&bytes).map_err(|e| registry_error("parse", e))?
         }
     };
-    let mounts = crate::mountinfo::current();
+    // Without a readable mount table nothing is known to be gone, so nothing is pruned.
+    let mounts = crate::mountinfo::current().ok();
     let mut entries: Vec<Entry> = entries
         .into_iter()
         .filter(|entry| {
-            let mounted = crate::mountinfo::at(&mounts, &entry.path).is_some();
+            let Some(mounts) = &mounts else {
+                return true;
+            };
+            let mounted = crate::mountinfo::at(mounts, &entry.path).is_some();
             let fresh = now().saturating_sub(entry.created) < STALE_PREPARED.as_secs();
             let keep = mounted || ((entry.kind == EntryKind::Fuse || entry.pending) && fresh);
             if !keep {
@@ -219,21 +223,29 @@ fn save_registry(dir: &Path, entries: &[Entry]) -> Result<()> {
         .map_err(|e| registry_error("save", e))
 }
 
+fn mount_table_error(_: std::io::Error) -> Error {
+    Error::Failed(crate::tr!("error-mount-table"))
+}
+
 /// After a mount attempt: keep the entry for `path` if something is mounted
 /// there (even a mount that attached after its deadline), drop it otherwise.
-fn settle(uid: u32, path: &Path) {
-    let mounted = crate::mountinfo::at(&crate::mountinfo::current(), path).is_some();
-    let _ = with_registry(|registry| {
-        if mounted {
+/// Without a readable mount table, a failed attempt stays a reservation.
+fn settle(uid: u32, path: &Path, succeeded: bool) {
+    let mounted = match crate::mountinfo::current() {
+        Ok(table) => Some(crate::mountinfo::at(&table, path).is_some()),
+        Err(_) => succeeded.then_some(true),
+    };
+    let _ = with_registry(|registry| match mounted {
+        Some(true) => {
             for entry in registry
                 .iter_mut()
                 .filter(|e| e.uid == uid && e.path == path)
             {
                 entry.pending = false;
             }
-        } else {
-            registry.retain(|e| !(e.uid == uid && e.path == path));
         }
+        Some(false) => registry.retain(|e| !(e.uid == uid && e.path == path)),
+        None => {}
     });
 }
 
@@ -777,7 +789,7 @@ impl Service {
             let _ = mountpoint::remove(&dir, &name);
         }
         // Whatever happened, the registry now tracks exactly what is mounted.
-        settle(caller.uid, &target);
+        settle(caller.uid, &target, outcome.is_ok());
         outcome?;
         crate::log!(
             info,
@@ -875,7 +887,7 @@ impl Service {
         if outcome.is_err() {
             let _ = mountpoint::remove(&dir, &name);
         }
-        settle(caller.uid, &target);
+        settle(caller.uid, &target, outcome.is_ok());
         outcome?;
         Ok(target)
     }
@@ -1100,7 +1112,8 @@ impl Service {
         // Unmount until nothing is mounted at the folder: the user may have
         // stacked a mount of their own on top of the kernel mount.
         for round in 0.. {
-            if crate::mountinfo::at(&crate::mountinfo::current(), &path).is_none() {
+            let table = crate::mountinfo::current().map_err(mount_table_error)?;
+            if crate::mountinfo::at(&table, &path).is_none() {
                 break;
             }
             if entry.kind == EntryKind::Fuse && !force {
@@ -1133,7 +1146,7 @@ impl Service {
             .get_connection_unix_user(zbus::names::BusName::Unique(sender))
             .await
             .map_err(|e| Error::NotAuthorized(e.to_string()))?;
-        let mounts = crate::mountinfo::current();
+        let mounts = crate::mountinfo::current().map_err(mount_table_error)?;
         let registry = load_registry()?;
         let mine: Vec<serde_json::Value> = registry
             .iter()

@@ -144,6 +144,7 @@ error-authorization-timeout = Se agotó el tiempo de la autorización
 error-authorization-failed = Falló la autorización: { $error }
 error-not-allowed = No tienes permiso para montar aquí
 error-registry = El servicio de montaje no puede leer su lista de montajes; consulta el registro del sistema
+error-mount-table = No se puede leer la tabla de montajes del sistema; consulta el registro del sistema
 error-too-many-pending = Se están preparando demasiadas conexiones a la vez; espera a que terminen
 error-service-busy = El servicio de montaje está ocupado; inténtalo de nuevo dentro de un momento
 error-too-many-mounts = Hay demasiados montajes abiertos

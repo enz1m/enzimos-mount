@@ -145,6 +145,7 @@ error-authorization-timeout = Authorization timed out
 error-authorization-failed = Authorization failed: { $error }
 error-not-allowed = You are not allowed to mount here
 error-registry = The mount service cannot read its list of mounts; see the system log
+error-mount-table = The system mount table cannot be read; see the system log
 error-too-many-pending = Too many connections are being set up at once; wait for them to finish
 error-service-busy = The mount service is busy; try again in a moment
 error-too-many-mounts = Too many mounts are open

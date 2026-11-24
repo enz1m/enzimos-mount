@@ -63,7 +63,9 @@ struct Active {
 
 impl Active {
     fn new(path: PathBuf, kernel: bool, fuse: Option<fuse::FuseMount>) -> Self {
-        let read_only = crate::mountinfo::at(&crate::mountinfo::current(), &path)
+        let read_only = crate::mountinfo::current()
+            .ok()
+            .and_then(|table| crate::mountinfo::at(&table, &path))
             .is_some_and(|m| m.read_only());
         Self {
             path,
@@ -2148,7 +2150,7 @@ impl Daemon {
     }
 
     async fn probe_all(self: &Arc<Self>) {
-        let table = crate::mountinfo::current();
+        let table = crate::mountinfo::current().ok();
         let targets: Vec<(String, PathBuf, bool)> = {
             let mut inner = self.lock();
             inner
@@ -2160,7 +2162,9 @@ impl Daemon {
                     (
                         id.clone(),
                         a.path.clone(),
-                        crate::mountinfo::at(&table, &a.path).is_some(),
+                        table
+                            .as_ref()
+                            .is_none_or(|t| crate::mountinfo::at(t, &a.path).is_some()),
                     )
                 })
                 .collect()
@@ -2388,7 +2392,9 @@ impl Daemon {
             return;
         }
         while receiver.recv().await.is_some() {
-            let table = crate::mountinfo::current();
+            let Ok(table) = crate::mountinfo::current() else {
+                continue;
+            };
             let gone: Vec<String> = self
                 .lock()
                 .mounts
@@ -2560,7 +2566,9 @@ fn leftovers_present() -> bool {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return false;
     };
-    let table = crate::mountinfo::current();
+    let Ok(table) = crate::mountinfo::current() else {
+        return true;
+    };
     entries
         .flatten()
         .any(|entry| match crate::mountinfo::at(&table, &entry.path()) {

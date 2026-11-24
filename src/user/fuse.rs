@@ -37,7 +37,9 @@ pub struct FuseMount {
 pub type ExitReport = (String, Option<i32>, String);
 
 fn mounted(path: &Path) -> bool {
-    crate::mountinfo::at(&crate::mountinfo::current(), path)
+    crate::mountinfo::current()
+        .ok()
+        .and_then(|table| crate::mountinfo::at(&table, path))
         .is_some_and(|m| m.fs_type.starts_with("fuse"))
 }
 
