@@ -82,7 +82,8 @@ at startup** (`SetMountAtBoot`, or `enzimos-mount startup ID on`):
   skipped when nothing is stored. It is ordered after the network stack, but
   nothing waits for it: a server that is off neither delays nor fails startup.
   It retries in the background (5 s doubling to 5 min) and exits when every
-  share is mounted.
+  share is mounted. A refused password is not retried, so it cannot lock the
+  account; the owner is asked for it after logging in.
 - **In a session,** the location also reconnects automatically like any
   auto-connect location.
 - **At shutdown,** `enzimos-mount-cleanup.service` stops before the network

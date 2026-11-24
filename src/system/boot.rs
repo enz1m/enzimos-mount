@@ -10,7 +10,8 @@
 //! `enzimos-mount-boot.service` runs [`run`] in the background. It is ordered
 //! after the network stack but nothing waits for it, so a server that is off
 //! never delays or fails startup. It retries with a growing pause (5 s doubling
-//! to 5 min) until every entry is mounted, then exits.
+//! to 5 min) until every entry is mounted, then exits. An entry whose login is
+//! refused or that otherwise needs its owner is not retried.
 //! `enzimos-mount-cleanup.service` stops before the network does at shutdown
 //! and detaches every kernel network mount ([`unmount_all`]), so shutdown never
 //! waits on a share whose server is gone.
@@ -19,7 +20,7 @@ use super::{Caller, Service, nfs_params, smb_params, string};
 use crate::error::{Error, Result};
 use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use zbus::OwnedVariant;
@@ -328,19 +329,57 @@ fn mounted(entry: &BootEntry) -> bool {
         .any(|e| e.uid == entry.uid && e.source == source && !e.pending)
 }
 
-/// Mount every stored entry, retrying until all are mounted; never fails.
+/// Whether a failed attempt needs its owner to act; retrying it alone would
+/// repeat a refused login and can lock the account.
+fn needs_user(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::NeedsCredentials(_)
+            | Error::AuthFailed(_)
+            | Error::NotAuthorized(_)
+            | Error::Unsupported(_)
+            | Error::Invalid(_)
+    )
+}
+
+/// Mount every stored entry, retrying transient failures until each is
+/// mounted or needs its owner; never fails.
 pub async fn run() {
     let service = Service::new();
     let mut pause = Duration::from_secs(5);
+    let mut flagged: HashSet<String> = HashSet::new();
+    let settled = |entry: &BootEntry, flagged: &HashSet<String>| {
+        flagged.contains(&entry.stem()) || mounted(entry)
+    };
     loop {
-        let pending: Vec<BootEntry> = list().into_iter().filter(|e| !mounted(e)).collect();
+        let pending: Vec<BootEntry> = list()
+            .into_iter()
+            .filter(|e| !settled(e, &flagged))
+            .collect();
         if pending.is_empty() {
-            crate::log!(info, "all startup shares are mounted");
+            if flagged.is_empty() {
+                crate::log!(info, "all startup shares are mounted");
+            } else {
+                crate::log!(
+                    info,
+                    "startup shares mounted except those needing their owner"
+                );
+            }
             return;
         }
         for entry in &pending {
             match mount(&service, entry).await {
                 Ok(path) => crate::log!(info, "mounted {} at {}", entry.source(), path.display()),
+                Err(error) if needs_user(&error) => {
+                    crate::log!(
+                        warn,
+                        "{} for uid {} needs its owner, not retrying: {}",
+                        entry.source(),
+                        entry.uid,
+                        error.message()
+                    );
+                    flagged.insert(entry.stem());
+                }
                 Err(error) => crate::log!(
                     info,
                     "{} not mounted yet: {}",
@@ -349,7 +388,7 @@ pub async fn run() {
                 ),
             }
         }
-        if list().iter().all(mounted) {
+        if list().iter().all(|e| settled(e, &flagged)) {
             continue;
         }
         tokio::time::sleep(pause).await;
