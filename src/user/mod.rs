@@ -33,6 +33,14 @@ pub const PROBE_INTERVAL: Duration = Duration::from_secs(15);
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Deadline for calls to the root service.
 pub const SYSTEM_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long suspend waits for network shares to be released. logind stops
+/// waiting for delay inhibitors after five seconds by default.
+pub const SLEEP_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
+/// Failed reconnections of a share released for suspend before the user is
+/// told it is gone.
+const RESTORE_ATTEMPTS: u32 = 4;
+/// `NM_STATE_ASLEEP`: networking is off because the system is suspending.
+const NM_STATE_ASLEEP: u32 = 10;
 /// Longest wait between automatic reconnection attempts.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
 
@@ -101,6 +109,10 @@ struct Inner {
     caps: Capabilities,
     busy: HashSet<String>,
     retry: HashMap<String, Retry>,
+    /// Between logind's suspend announcement and resume.
+    sleeping: bool,
+    /// Network shares released for suspend, reconnected after resume.
+    restore: HashSet<String>,
     clouds: Vec<cloud::Account>,
     /// Cloud accounts whose sign-in is under way: provider and the task.
     signing: HashMap<String, (cloud::Provider, tokio::task::AbortHandle)>,
@@ -1372,7 +1384,9 @@ impl Daemon {
         // A location the user disconnects stays disconnected until they
         // connect it again (or log in again), even if it auto-connects.
         if id.starts_with("net-") || cloud::valid_id(id) {
-            self.lock().retry.entry(id.to_owned()).or_default().paused = true;
+            let mut inner = self.lock();
+            inner.retry.entry(id.to_owned()).or_default().paused = true;
+            inner.restore.remove(id);
         }
         let active = self.lock().mounts.remove(id);
         let Some(mut active) = active else {
@@ -2139,6 +2153,7 @@ impl Daemon {
             let idle = {
                 let inner = self.lock();
                 inner.mounts.is_empty()
+                    && inner.restore.is_empty()
                     && !inner.locations.iter().any(|l| {
                         l.auto_connect
                             && inner
@@ -2161,6 +2176,9 @@ impl Daemon {
         let table = crate::mountinfo::current().ok();
         let targets: Vec<(String, PathBuf, bool)> = {
             let mut inner = self.lock();
+            if inner.sleeping {
+                return;
+            }
             inner
                 .mounts
                 .iter_mut()
@@ -2188,11 +2206,19 @@ impl Daemon {
                 let result = fuse::probe(path, PROBE_TIMEOUT).await;
                 let (disconnected, change) = {
                     let mut inner = daemon.lock();
-                    if let Some(active) = inner.mounts.get_mut(&id) {
-                        active.probing = false;
-                        if let Ok(space) = result {
-                            active.space = Some(space);
+                    // A share released for suspend fails its last probe.
+                    if inner.sleeping {
+                        if let Some(active) = inner.mounts.get_mut(&id) {
+                            active.probing = false;
                         }
+                        return;
+                    }
+                    let Some(active) = inner.mounts.get_mut(&id) else {
+                        return;
+                    };
+                    active.probing = false;
+                    if let Ok(space) = result {
+                        active.space = Some(space);
                     }
                     let was = inner.overlay.get(&id) == Some(&State::NotResponding);
                     match result {
@@ -2241,7 +2267,14 @@ impl Daemon {
     fn autoconnect(self: &Arc<Self>) {
         let now = Instant::now();
         let due: Vec<String> = {
-            let inner = self.lock();
+            let mut inner = self.lock();
+            if inner.sleeping {
+                return;
+            }
+            let Inner {
+                restore, mounts, ..
+            } = &mut *inner;
+            restore.retain(|id| !mounts.contains_key(id));
             let clouds = inner
                 .clouds
                 .iter()
@@ -2250,7 +2283,7 @@ impl Daemon {
             inner
                 .locations
                 .iter()
-                .filter(|l| l.auto_connect)
+                .filter(|l| l.auto_connect || inner.restore.contains(&l.id))
                 .map(|l| &l.id)
                 .chain(clouds)
                 .filter(|id| !inner.mounts.contains_key(*id) && !inner.busy.contains(*id))
@@ -2266,12 +2299,17 @@ impl Daemon {
             let daemon = Arc::clone(self);
             tokio::spawn(async move {
                 let result = daemon.mount(&id, Credentials::default()).await;
+                let mut gone = false;
                 let attention = {
                     let mut inner = daemon.lock();
+                    // Auto-connecting locations keep retrying on their own.
+                    let restoring = inner.restore.contains(&id)
+                        && !inner.locations.iter().any(|l| l.id == id && l.auto_connect);
                     let retry = inner.retry.entry(id.clone()).or_default();
-                    match result {
+                    let attention = match result {
                         Ok(_) => {
                             inner.retry.remove(&id);
+                            inner.restore.remove(&id);
                             None
                         }
                         Err(
@@ -2293,11 +2331,18 @@ impl Daemon {
                             )
                             .min(MAX_BACKOFF);
                             retry.next = Some(Instant::now() + wait);
+                            gone = restoring && retry.failures >= RESTORE_ATTEMPTS;
                             None
                         }
+                    };
+                    if attention.is_some() || gone {
+                        inner.restore.remove(&id);
                     }
+                    attention
                 };
-                if let Some(error) = attention {
+                if gone {
+                    daemon.helper_died(&id).await;
+                } else if let Some(error) = attention {
                     let label = daemon.label(&id);
                     let body = match error {
                         Error::NeedsCredentials(_) | Error::AuthFailed(_) => {
@@ -2364,10 +2409,131 @@ impl Daemon {
                 self.network_up();
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 self.autoconnect();
-            } else {
+            } else if state != NM_STATE_ASLEEP {
                 self.probe_all().await;
             }
         }
+    }
+
+    /// Release kernel network shares before suspend. When the Wi-Fi goes
+    /// down, any task touching such a share blocks in the kernel until the
+    /// client gives up on the server, about half a minute, and systemd cannot
+    /// freeze the session around it, so suspend stalls that long with the
+    /// screen frozen. A forced unmount fails those requests at once. The
+    /// shares reconnect after resume.
+    async fn watch_sleep(self: Arc<Self>) {
+        let Some(system) = self.system.clone() else {
+            return;
+        };
+        let Ok(manager) = zbus::Proxy::new_owned(
+            system,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await
+        else {
+            return;
+        };
+        let Ok(mut signals) = manager.receive_signal("PrepareForSleep").await else {
+            return;
+        };
+        let mut inhibitor = inhibit_sleep(&manager).await;
+        while let Some(message) = signals.next().await {
+            let Ok(starting) = message.body().deserialize::<bool>() else {
+                continue;
+            };
+            if starting {
+                self.lock().sleeping = true;
+                self.release_for_sleep().await;
+                drop(inhibitor.take());
+            } else {
+                self.lock().sleeping = false;
+                if inhibitor.is_none() {
+                    inhibitor = inhibit_sleep(&manager).await;
+                }
+                self.changed();
+                self.autoconnect();
+            }
+        }
+    }
+
+    async fn release_for_sleep(self: &Arc<Self>) {
+        let shares: Vec<(String, PathBuf)> = {
+            let inner = self.lock();
+            inner
+                .mounts
+                .iter()
+                .filter(|(id, a)| a.kernel && id.starts_with("net-"))
+                .map(|(id, a)| (id.clone(), a.path.clone()))
+                .collect()
+        };
+        if shares.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let mut waits = tokio::task::JoinSet::new();
+        for (id, path) in shares {
+            // Busy keeps the mount table watcher from releasing the folder a
+            // second time, and reconnection from reusing it, until the root
+            // service is done with it.
+            let Ok(guard) = self.begin(&id) else {
+                continue;
+            };
+            let daemon = Arc::clone(self);
+            let target = path.clone();
+            let call = tokio::spawn(async move {
+                let _guard = guard;
+                daemon
+                    .system_call::<_, ()>("Unmount", &(target.to_string_lossy().as_ref(), true))
+                    .await
+            });
+            let daemon = Arc::clone(self);
+            waits.spawn(async move {
+                // The kernel drops the mount at once. Logging off from a
+                // server that is already out of reach keeps the call going
+                // for seconds after that, and suspend need not wait for it.
+                let mounted = || {
+                    crate::mountinfo::current()
+                        .map_or(true, |table| crate::mountinfo::at(&table, &path).is_some())
+                };
+                while mounted() {
+                    if call.is_finished() {
+                        let error = match call.await {
+                            Ok(Err(error)) => error.message(),
+                            Ok(Ok(())) => "still mounted".to_owned(),
+                            Err(error) => error.to_string(),
+                        };
+                        crate::log!(warn, "{id} could not be released for suspend: {error}");
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                let mut inner = daemon.lock();
+                inner.mounts.remove(&id);
+                inner.overlay.remove(&id);
+                inner.restore.insert(id);
+                drop(inner);
+                daemon.changed();
+            });
+        }
+        // Calls still running when suspend proceeds finish after resume.
+        let finished = tokio::time::timeout(SLEEP_RELEASE_TIMEOUT, async {
+            while waits.join_next().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        waits.detach_all();
+        crate::log!(
+            info,
+            "network shares {} for suspend after {} ms",
+            if finished {
+                "released"
+            } else {
+                "still releasing"
+            },
+            started.elapsed().as_millis()
+        );
     }
 
     async fn watch_mount_table(self: Arc<Self>) {
@@ -2958,6 +3124,7 @@ pub async fn serve() -> zbus::Result<()> {
     tokio::spawn(Arc::clone(&daemon).watch_drives());
     tokio::spawn(Arc::clone(&daemon).watch_usb());
     tokio::spawn(Arc::clone(&daemon).watch_network());
+    tokio::spawn(Arc::clone(&daemon).watch_sleep());
     tokio::spawn(Arc::clone(&daemon).watch_mount_table());
     tokio::spawn(Arc::clone(&daemon).health());
     let _ = daemon
@@ -2995,6 +3162,28 @@ pub async fn serve() -> zbus::Result<()> {
         let _ = std::fs::remove_dir(path);
     }
     Ok(())
+}
+
+/// A delay lock that holds suspend until the shares are released.
+async fn inhibit_sleep(manager: &zbus::Proxy<'_>) -> Option<OwnedFd> {
+    match manager
+        .call::<_, _, OwnedFd>(
+            "Inhibit",
+            &(
+                "sleep",
+                "enzimos-mount",
+                "Disconnecting network shares",
+                "delay",
+            ),
+        )
+        .await
+    {
+        Ok(fd) => Some(fd),
+        Err(error) => {
+            crate::log!(warn, "no suspend delay lock: {error}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

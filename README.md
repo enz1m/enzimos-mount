@@ -111,6 +111,11 @@ at startup** (`SetMountAtBoot`, or `enzimos-mount startup ID on`):
 - **Busy:** when files are open, the message names the programs holding them.
 - **Disconnecting:** a location you disconnect is not reconnected
   automatically until you connect it again.
+- **Suspend:** the session service holds suspend briefly with a logind delay
+  lock and force-unmounts its kernel network mounts (SMB, NFS) before the
+  network goes down, so suspend never waits on a server it can no longer
+  reach. They reconnect after resume; one that still fails after four tries
+  gets a "… disconnected" notification.
 - **iPhones:** pairing waits up to a minute for "Trust" and says so in a
   notification.
 - **Free space:** free and total space are reported for mounted items.
