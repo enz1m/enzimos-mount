@@ -1327,7 +1327,7 @@ mod tests {
             pending: true,
         };
         with_registry_in(&dir, |r| {
-            r.extend([entry("fresh", now()), entry("stale", 0)])
+            r.extend([entry("fresh", now()), entry("stale", 0)]);
         })
         .unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;

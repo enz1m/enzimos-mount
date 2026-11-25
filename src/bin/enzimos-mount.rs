@@ -200,7 +200,7 @@ async fn run(proxy: &zbus::Proxy<'_>, command: &str, args: &Args) -> zbus::Resul
         "unmount" => {
             proxy
                 .call::<_, _, ()>("Unmount", &(id(), args.flags.contains_key("--force")))
-                .await?
+                .await?;
         }
         "eject" => proxy.call::<_, _, ()>("Eject", &(id(),)).await?,
         "remove" => proxy.call::<_, _, ()>("SafelyRemove", &(id(),)).await?,
@@ -222,7 +222,7 @@ async fn run(proxy: &zbus::Proxy<'_>, command: &str, args: &Args) -> zbus::Resul
         "update" => {
             proxy
                 .call::<_, _, ()>("UpdateLocation", &(id(), options(args)))
-                .await?
+                .await?;
         }
         "forget" => proxy.call::<_, _, ()>("RemoveLocation", &(id(),)).await?,
         "startup" => {

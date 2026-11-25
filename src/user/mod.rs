@@ -2809,7 +2809,7 @@ fn apply_options(location: &mut Location, options: &HashMap<String, OwnedVariant
             "save" => {
                 location.saved = value
                     .downcast_ref::<bool>()
-                    .map_err(|_| Error::Invalid("save must be a boolean".to_owned()))?
+                    .map_err(|_| Error::Invalid("save must be a boolean".to_owned()))?;
             }
             "auto_connect" => {
                 location.auto_connect = value
